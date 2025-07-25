@@ -5,17 +5,32 @@ import { ThemedView } from "@/components/ThemedView";
 import { ThemedText } from "@/components/ThemedText";
 import { api, SearchResult } from "@/services/api";
 import { getResolutionFromM3U8 } from "@/services/m3u8";
+import { testPlaySource, sortSourcesByScore, calculateSourceScore } from "@/services/speedTest";
 import { StyledButton } from "@/components/StyledButton";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 export default function DetailScreen() {
   const { source, q } = useLocalSearchParams();
   const router = useRouter();
-  const [searchResults, setSearchResults] = useState<(SearchResult & { resolution?: string | null })[]>([]);
-  const [detail, setDetail] = useState<(SearchResult & { resolution?: string | null }) | null>(null);
+  const [searchResults, setSearchResults] = useState<(SearchResult & { 
+    resolution?: string | null;
+    latency?: number;
+    downloadSpeed?: number;
+    isAvailable?: boolean;
+    score?: number;
+  })[]>([]);
+  const [detail, setDetail] = useState<(SearchResult & { 
+    resolution?: string | null;
+    latency?: number;
+    downloadSpeed?: number;
+    isAvailable?: boolean;
+    score?: number;
+  }) | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [allSourcesLoaded, setAllSourcesLoaded] = useState(false);
+  const [isSpeedTesting, setIsSpeedTesting] = useState(false);
+  const [speedTestProgress, setSpeedTestProgress] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
   const { videoSource } = useSettingsStore();
 
@@ -79,7 +94,14 @@ export default function DetailScreen() {
                   }
                 }
 
-                const resultWithResolution = { ...searchResult, resolution };
+                const resultWithResolution = { 
+                  ...searchResult, 
+                  resolution,
+                  latency: -1,
+                  downloadSpeed: 0,
+                  isAvailable: true,
+                  score: 0
+                };
 
                 setSearchResults((prev) => [...prev, resultWithResolution]);
 
@@ -99,6 +121,9 @@ export default function DetailScreen() {
           if (!foundFirstResult) {
             setError("未找到播放源");
             setLoading(false);
+          } else {
+            // 开始测速
+            performSpeedTests();
           }
         } catch (e) {
           if ((e as Error).name !== "AbortError") {
@@ -116,6 +141,68 @@ export default function DetailScreen() {
       controllerRef.current?.abort();
     };
   }, [q, source, videoSource.enabledAll, videoSource.sources]);
+
+  // 执行测速的函数
+  const performSpeedTests = async () => {
+    setIsSpeedTesting(true);
+    setSpeedTestProgress(0);
+
+    const currentResults = [...searchResults];
+    const totalSources = currentResults.length;
+
+    for (let i = 0; i < currentResults.length; i++) {
+      const result = currentResults[i];
+      
+      try {
+        if (result.episodes && result.episodes.length > 0) {
+          // 测试第一个剧集的播放源
+          const firstEpisodeUrl = result.episodes[0];
+          const speedTest = await testPlaySource(firstEpisodeUrl, controllerRef.current?.signal);
+          
+          // 计算综合得分
+          const score = calculateSourceScore(
+            speedTest.latency,
+            speedTest.downloadSpeed,
+            result.resolution,
+            result.episodes.length,
+            speedTest.isAvailable
+          );
+
+          // 更新结果
+          const updatedResult = {
+            ...result,
+            latency: speedTest.latency,
+            downloadSpeed: speedTest.downloadSpeed,
+            isAvailable: speedTest.isAvailable,
+            score
+          };
+
+          currentResults[i] = updatedResult;
+
+          // 更新状态
+          setSearchResults([...currentResults]);
+          
+          // 如果这是当前选中的详情，也更新详情
+          if (detail && detail.source === result.source) {
+            setDetail(updatedResult);
+          }
+        }
+      } catch (error) {
+        console.error(`Speed test failed for ${result.source_name}:`, error);
+      }
+
+      // 更新进度
+      setSpeedTestProgress(((i + 1) / totalSources) * 100);
+    }
+
+    // 按得分排序
+    const sortedResults = sortSourcesByScore(currentResults);
+    const sortedSearchResults = currentResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+    
+    setSearchResults(sortedSearchResults);
+    setIsSpeedTesting(false);
+    setSpeedTestProgress(100);
+  };
 
   const handlePlay = (episodeName: string, episodeIndex: number) => {
     if (!detail) return;
@@ -183,6 +270,22 @@ export default function DetailScreen() {
             <View style={styles.sourcesTitleContainer}>
               <ThemedText style={styles.sourcesTitle}>选择播放源 共 {searchResults.length} 个</ThemedText>
               {!allSourcesLoaded && <ActivityIndicator style={{ marginLeft: 10 }} />}
+              {isSpeedTesting && (
+                <View style={styles.speedTestContainer}>
+                  <ActivityIndicator size="small" style={{ marginLeft: 10 }} />
+                  <ThemedText style={styles.speedTestText}>
+                    测速中... {Math.round(speedTestProgress)}%
+                  </ThemedText>
+                </View>
+              )}
+              {!isSpeedTesting && allSourcesLoaded && (
+                <StyledButton
+                  onPress={performSpeedTests}
+                  style={styles.speedTestButton}
+                  text="重新测速"
+                  textStyle={styles.speedTestButtonText}
+                />
+              )}
             </View>
             <View style={styles.sourceList}>
               {searchResults.map((item, index) => (
@@ -193,19 +296,36 @@ export default function DetailScreen() {
                   isSelected={detail?.source === item.source}
                   style={styles.sourceButton}
                 >
-                  <ThemedText style={styles.sourceButtonText}>{item.source_name}</ThemedText>
-                  {item.episodes.length > 1 && (
-                    <View style={styles.badge}>
-                      <Text style={styles.badgeText}>
-                        {item.episodes.length > 99 ? "99+" : `${item.episodes.length}`} 集
-                      </Text>
+                  <View style={styles.sourceButtonContent}>
+                    <ThemedText style={styles.sourceButtonText}>{item.source_name}</ThemedText>
+                    <View style={styles.badgeContainer}>
+                      {item.episodes.length > 1 && (
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeText}>
+                            {item.episodes.length > 99 ? "99+" : `${item.episodes.length}`} 集
+                          </Text>
+                        </View>
+                      )}
+                      {item.resolution && (
+                        <View style={[styles.badge, { backgroundColor: "#28a745" }]}>
+                          <Text style={styles.badgeText}>{item.resolution}</Text>
+                        </View>
+                      )}
+                      {typeof item.score === 'number' && item.score > 0 && (
+                        <View style={[styles.badge, { backgroundColor: "#17a2b8" }]}>
+                          <Text style={styles.badgeText}>得分: {item.score}</Text>
+                        </View>
+                      )}
                     </View>
-                  )}
-                  {item.resolution && (
-                    <View style={[styles.badge, { backgroundColor: "#28a745" }]}>
-                      <Text style={styles.badgeText}>{item.resolution}</Text>
-                    </View>
-                  )}
+                    {/* 显示测速信息 */}
+                    {typeof item.latency === 'number' && item.latency >= 0 && (
+                      <View style={styles.speedInfo}>
+                        <Text style={styles.speedInfoText}>
+                          延迟: {item.latency}ms | 速度: {Math.round(item.downloadSpeed || 0)}KB/s
+                        </Text>
+                      </View>
+                    )}
+                  </View>
                 </StyledButton>
               ))}
             </View>
@@ -289,6 +409,28 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "bold",
   },
+  speedTestContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginLeft: 15,
+  },
+  speedTestText: {
+    fontSize: 14,
+    color: "#888",
+    marginLeft: 5,
+  },
+  speedTestButton: {
+    marginLeft: 15,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: "#007bff",
+    borderRadius: 6,
+  },
+  speedTestButtonText: {
+    color: "white",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
   sourceList: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -296,21 +438,44 @@ const styles = StyleSheet.create({
   sourceButton: {
     margin: 8,
   },
+  sourceButtonContent: {
+    alignItems: "center",
+  },
   sourceButtonText: {
     color: "white",
     fontSize: 16,
+    textAlign: "center",
+  },
+  badgeContainer: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    marginTop: 4,
   },
   badge: {
     backgroundColor: "red",
     borderRadius: 10,
     paddingHorizontal: 6,
     paddingVertical: 2,
-    marginLeft: 8,
+    marginLeft: 4,
+    marginTop: 2,
   },
   badgeText: {
     color: "white",
     fontSize: 12,
     fontWeight: "bold",
+  },
+  speedInfo: {
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    borderRadius: 6,
+  },
+  speedInfoText: {
+    color: "#ccc",
+    fontSize: 10,
+    textAlign: "center",
   },
   episodesContainer: {
     marginTop: 20,

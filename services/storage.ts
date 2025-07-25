@@ -34,6 +34,12 @@ export interface AppSettings {
     };
   },
   m3uUrl: string;
+  speedTest: {
+    autoEnabled: boolean;
+    timeoutSeconds: number;
+    enableCaching: boolean;
+    sortByScore: boolean;
+  };
 }
 
 // --- Helper ---
@@ -190,6 +196,12 @@ export class SettingsManager {
         sources: {},
       },
       m3uUrl: "https://ghfast.top/https://raw.githubusercontent.com/sjnhnp/adblock/refs/heads/main/filtered_http_only_valid.m3u",
+      speedTest: {
+        autoEnabled: true,
+        timeoutSeconds: 8,
+        enableCaching: true,
+        sortByScore: true,
+      },
     };
     try {
       const data = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);

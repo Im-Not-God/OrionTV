@@ -14,6 +14,12 @@ interface SettingsState {
       [key: string]: boolean;
     };
   };
+  speedTest: {
+    autoEnabled: boolean;
+    timeoutSeconds: number;
+    enableCaching: boolean;
+    sortByScore: boolean;
+  };
   isModalVisible: boolean;
   loadSettings: () => Promise<void>;
   setApiBaseUrl: (url: string) => void;
@@ -21,6 +27,7 @@ interface SettingsState {
   setRemoteInputEnabled: (enabled: boolean) => void;
   saveSettings: () => Promise<void>;
   setVideoSource: (config: { enabledAll: boolean; sources: {[key: string]: boolean} }) => void;
+  setSpeedTestConfig: (config: { autoEnabled?: boolean; timeoutSeconds?: number; enableCaching?: boolean; sortByScore?: boolean }) => void;
   showModal: () => void;
   hideModal: () => void;
 }
@@ -35,6 +42,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     enabledAll: true,
     sources: {},
   },
+  speedTest: {
+    autoEnabled: true,
+    timeoutSeconds: 8,
+    enableCaching: true,
+    sortByScore: true,
+  },
   loadSettings: async () => {
     const settings = await SettingsManager.get();
     set({ 
@@ -45,6 +58,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         enabledAll: true,
         sources: {},
       },
+      speedTest: settings.speedTest || {
+        autoEnabled: true,
+        timeoutSeconds: 8,
+        enableCaching: true,
+        sortByScore: true,
+      },
     });
     api.setBaseUrl(settings.apiBaseUrl);
   },
@@ -52,13 +71,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setM3uUrl: (url) => set({ m3uUrl: url }),
   setRemoteInputEnabled: (enabled) => set({ remoteInputEnabled: enabled }),
   setVideoSource: (config) => set({ videoSource: config }),
+  setSpeedTestConfig: (config) => set((state) => ({
+    speedTest: { ...state.speedTest, ...config }
+  })),
   saveSettings: async () => {
-    const { apiBaseUrl, m3uUrl, remoteInputEnabled, videoSource } = get();
+    const { apiBaseUrl, m3uUrl, remoteInputEnabled, videoSource, speedTest } = get();
     await SettingsManager.save({ 
       apiBaseUrl,
       m3uUrl,
       remoteInputEnabled,
       videoSource,
+      speedTest,
     });
     api.setBaseUrl(apiBaseUrl);
     set({ isModalVisible: false });
