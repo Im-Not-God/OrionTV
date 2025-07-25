@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import Toast from "react-native-toast-message";
-import { VideoRef, OnLoadData, OnProgressData } from "react-native-video";
+import { AVPlaybackStatus, Video } from "expo-av";
 import { RefObject } from "react";
 import { PlayRecord, PlayRecordManager } from "@/services/storage";
 import useDetailStore, { episodesSelectorBySource } from "./detailStore";
@@ -10,21 +10,11 @@ interface Episode {
   title: string;
 }
 
-// Custom playback status interface to replace AVPlaybackStatus
-interface PlaybackStatus {
-  isLoaded: boolean;
-  isPlaying: boolean;
-  positionMillis: number;
-  durationMillis?: number;
-  didJustFinish?: boolean;
-  error?: string;
-}
-
 interface PlayerState {
-  videoRef: RefObject<VideoRef> | null;
+  videoRef: RefObject<Video> | null;
   currentEpisodeIndex: number;
   episodes: Episode[];
-  status: PlaybackStatus | null;
+  status: AVPlaybackStatus | null;
   isLoading: boolean;
   showControls: boolean;
   showEpisodeModal: boolean;
@@ -36,7 +26,7 @@ interface PlayerState {
   initialPosition: number;
   introEndTime?: number;
   outroStartTime?: number;
-  setVideoRef: (ref: RefObject<VideoRef>) => void;
+  setVideoRef: (ref: RefObject<Video>) => void;
   loadVideo: (options: {
     source: string;
     id: string;
@@ -47,8 +37,7 @@ interface PlayerState {
   playEpisode: (index: number) => void;
   togglePlayPause: () => void;
   seek: (duration: number) => void;
-  handlePlaybackStatusUpdate: (data: OnProgressData) => void;
-  handleLoad: (data: OnLoadData) => void;
+  handlePlaybackStatusUpdate: (newStatus: AVPlaybackStatus) => void;
   setLoading: (loading: boolean) => void;
   setShowControls: (show: boolean) => void;
   setShowEpisodeModal: (show: boolean) => void;
@@ -79,29 +68,40 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
   initialPosition: 0,
   introEndTime: undefined,
   outroStartTime: undefined,
+  _seekTimeout: undefined,
   _isRecordSaveThrottled: false,
 
   setVideoRef: (ref) => set({ videoRef: ref }),
 
   loadVideo: async ({ source, id, episodeIndex, position, title }) => {
-    const detail = useDetailStore.getState().detail;
-    if (!detail) return;
+    let detail = useDetailStore.getState().detail;
+    let episodes = episodesSelectorBySource(source)(useDetailStore.getState());
 
     set({
       isLoading: true,
-      initialPosition: position ? position * 1000 : 0, // Convert to milliseconds
     });
 
+    if (!detail || !episodes || episodes.length === 0 || detail.title !== title) {
+      await useDetailStore.getState().init(title, source, id);
+      detail = useDetailStore.getState().detail;
+      episodes = episodesSelectorBySource(source)(useDetailStore.getState());
+      if (!detail) {
+        console.info("Detail not found after initialization");
+        return;
+      }
+    }
+
     try {
-      const episodes = episodesSelectorBySource(useDetailStore.getState())(source);
-      
-      const playRecord = await PlayRecordManager.get(source, id);
-      
+      const playRecord = await PlayRecordManager.get(detail.source, detail.id.toString());
+      const initialPositionFromRecord = playRecord?.play_time ? playRecord.play_time * 1000 : 0;
       set({
-        episodes,
-        currentEpisodeIndex: episodeIndex,
         isLoading: false,
-        initialPosition: position ? position * 1000 : (playRecord?.play_time ? playRecord.play_time * 1000 : 0),
+        currentEpisodeIndex: episodeIndex,
+        initialPosition: position || initialPositionFromRecord,
+        episodes: episodes.map((ep, index) => ({
+          url: ep,
+          title: `第 ${index + 1} 集`,
+        })),
         introEndTime: playRecord?.introEndTime,
         outroStartTime: playRecord?.outroStartTime,
       });
@@ -111,67 +111,63 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     }
   },
 
-  playEpisode: (index) => {
-    const { episodes } = get();
+  playEpisode: async (index) => {
+    const { episodes, videoRef } = get();
     if (index >= 0 && index < episodes.length) {
-      set({ currentEpisodeIndex: index, showEpisodeModal: false });
-    }
-  },
-
-  togglePlayPause: () => {
-    const { videoRef, status } = get();
-    if (videoRef?.current && status?.isLoaded) {
-      if (status.isPlaying) {
-        videoRef.current.pause();
-      } else {
-        videoRef.current.resume();
+      set({
+        currentEpisodeIndex: index,
+        showNextEpisodeOverlay: false,
+        initialPosition: 0,
+        progressPosition: 0,
+        seekPosition: 0,
+      });
+      try {
+        await videoRef?.current?.replayAsync();
+      } catch (error) {
+        console.error("Failed to replay video:", error);
+        Toast.show({ type: "error", text1: "播放失败" });
       }
     }
   },
 
-  seek: (positionMillis) => {
-    const { videoRef, _seekTimeout } = get();
-    
-    // Clear existing timeout
-    if (_seekTimeout) {
-      clearTimeout(_seekTimeout);
+  togglePlayPause: async () => {
+    const { status, videoRef } = get();
+    if (status?.isLoaded) {
+      try {
+        if (status.isPlaying) {
+          await videoRef?.current?.pauseAsync();
+        } else {
+          await videoRef?.current?.playAsync();
+        }
+      } catch (error) {
+        console.error("Failed to toggle play/pause:", error);
+        Toast.show({ type: "error", text1: "操作失败" });
+      }
+    }
+  },
+
+  seek: async (duration) => {
+    const { status, videoRef } = get();
+    if (!status?.isLoaded || !status.durationMillis) return;
+
+    const newPosition = Math.max(0, Math.min(status.positionMillis + duration, status.durationMillis));
+    try {
+      await videoRef?.current?.setPositionAsync(newPosition);
+    } catch (error) {
+      console.error("Failed to seek video:", error);
+      Toast.show({ type: "error", text1: "快进/快退失败" });
     }
 
     set({
       isSeeking: true,
-      seekPosition: positionMillis / (get().status?.durationMillis || 1),
+      seekPosition: newPosition / status.durationMillis,
     });
 
-    // Seek immediately
-    if (videoRef?.current) {
-      videoRef.current.seek(positionMillis / 1000); // Convert to seconds
+    if (get()._seekTimeout) {
+      clearTimeout(get()._seekTimeout);
     }
-
-    // Set timeout to end seeking state
-    const timeoutId = setTimeout(() => {
-      set({ isSeeking: false });
-    }, 500);
-
+    const timeoutId = setTimeout(() => set({ isSeeking: false }), 1000);
     set({ _seekTimeout: timeoutId });
-  },
-
-  handleLoad: (data: OnLoadData) => {
-    const newStatus: PlaybackStatus = {
-      isLoaded: true,
-      isPlaying: false,
-      positionMillis: 0,
-      durationMillis: data.duration * 1000, // Convert to milliseconds
-      didJustFinish: false,
-    };
-
-    set({ status: newStatus, isLoading: false });
-
-    // Handle initial position jump
-    const { initialPosition, introEndTime } = get();
-    const jumpPosition = initialPosition || introEndTime || 0;
-    if (jumpPosition > 0 && get().videoRef?.current) {
-      get().videoRef?.current.seek(jumpPosition / 1000); // Convert to seconds
-    }
   },
 
   setIntroEndTime: () => {
@@ -242,38 +238,38 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     const { detail } = useDetailStore.getState();
     const { currentEpisodeIndex, episodes, status, introEndTime, outroStartTime } = get();
     if (detail && status?.isLoaded) {
-      const existingRecord = PlayRecordManager.get(detail.source, detail.id.toString());
+      const existingRecord = {
+        introEndTime,
+        outroStartTime,
+      };
       PlayRecordManager.save(detail.source, detail.id.toString(), {
         title: detail.title,
-        poster: detail.poster || "",
         cover: detail.poster || "",
-        index: currentEpisodeIndex,
+        index: currentEpisodeIndex + 1,
         total_episodes: episodes.length,
         play_time: Math.floor(status.positionMillis / 1000),
         total_time: status.durationMillis ? Math.floor(status.durationMillis / 1000) : 0,
         source_name: detail.source_name,
         year: detail.year || "",
-        introEndTime,
-        outroStartTime,
+        ...existingRecord,
         ...updates,
       });
       console.log("Play record saved")
     }
   },
 
-  handlePlaybackStatusUpdate: (data: OnProgressData) => {
+  handlePlaybackStatusUpdate: (newStatus) => {
+    if (!newStatus.isLoaded) {
+      if (newStatus.error) {
+        console.info(`Playback Error: ${newStatus.error}`);
+      }
+      set({ status: newStatus });
+      return;
+    }
+
     const { currentEpisodeIndex, episodes, outroStartTime, playEpisode } = get();
     const detail = useDetailStore.getState().detail;
 
-    const newStatus: PlaybackStatus = {
-      isLoaded: true,
-      isPlaying: true, // react-native-video progress events only fire when playing
-      positionMillis: data.currentTime * 1000, // Convert to milliseconds
-      durationMillis: data.seekableDuration * 1000, // Convert to milliseconds
-      didJustFinish: false,
-    };
-
-    // Check for outro auto-skip
     if (
       outroStartTime &&
       newStatus.durationMillis &&
@@ -293,6 +289,12 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
         set({ showNextEpisodeOverlay: true });
       } else {
         set({ showNextEpisodeOverlay: false });
+      }
+    }
+
+    if (newStatus.didJustFinish) {
+      if (currentEpisodeIndex < episodes.length - 1) {
+        playEpisode(currentEpisodeIndex + 1);
       }
     }
 

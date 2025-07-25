@@ -1,7 +1,7 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { Video, ResizeMode } from "expo-av";
+import Video, { VideoRef, ResizeMode, OnLoadData, OnProgressData } from "react-native-video";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
 import { PlayerControls } from "@/components/PlayerControls";
@@ -14,11 +14,13 @@ import useDetailStore from "@/stores/detailStore";
 import { useTVRemoteHandler } from "@/hooks/useTVRemoteHandler";
 import Toast from "react-native-toast-message";
 import usePlayerStore, { selectCurrentEpisode } from "@/stores/playerStore";
+import { M3U8AdFilterService } from "@/services/m3u8AdFilter";
 
 export default function PlayScreen() {
-  const videoRef = useRef<Video>(null);
+  const videoRef = useRef<VideoRef>(null);
   const router = useRouter();
   useKeepAwake();
+  const [filteredUrl, setFilteredUrl] = useState<string>("");
   const {
     episodeIndex: episodeIndexStr,
     position: positionStr,
@@ -47,12 +49,47 @@ export default function PlayScreen() {
     introEndTime,
     setVideoRef,
     handlePlaybackStatusUpdate,
+    handleLoad,
     setShowControls,
     // setShowNextEpisodeOverlay,
     reset,
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
+
+  // M3U8广告过滤效果
+  useEffect(() => {
+    const processVideoUrl = async () => {
+      if (currentEpisode?.url) {
+        if (currentEpisode.url.toLowerCase().includes('.m3u8')) {
+          try {
+            const filtered = await M3U8AdFilterService.filterM3U8(currentEpisode.url, {
+              removeAds: true,
+              skipIntro: false,
+              minSegmentDuration: 3
+            });
+            
+            if (filtered.removedSegments > 0) {
+              Toast.show({
+                type: "success",
+                text1: "广告过滤",
+                text2: `已过滤 ${filtered.removedSegments} 个广告片段`,
+              });
+            }
+            
+            setFilteredUrl(filtered.filteredUrl);
+          } catch (error) {
+            console.error('M3U8过滤失败:', error);
+            setFilteredUrl(currentEpisode.url);
+          }
+        } else {
+          setFilteredUrl(currentEpisode.url);
+        }
+      }
+    };
+
+    processVideoUrl();
+  }, [currentEpisode?.url]);
 
   useEffect(() => {
     setVideoRef(videoRef);
@@ -68,7 +105,7 @@ export default function PlayScreen() {
   useEffect(() => {
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (nextAppState === "background" || nextAppState === "inactive") {
-        videoRef.current?.pauseAsync();
+        videoRef.current?.pause();
       }
     };
 
@@ -125,20 +162,25 @@ export default function PlayScreen() {
         <Video
           ref={videoRef}
           style={styles.videoPlayer}
-          source={{ uri: currentEpisode?.url || "" }}
-          posterSource={{ uri: detail?.poster ?? "" }}
-          resizeMode={ResizeMode.CONTAIN}
-          onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-          onLoad={() => {
-            const jumpPosition = initialPosition || introEndTime || 0;
-            if (jumpPosition > 0) {
-              videoRef.current?.setPositionAsync(jumpPosition);
-            }
-            usePlayerStore.setState({ isLoading: false });
-          }}
+          source={{ uri: filteredUrl || currentEpisode?.url || "" }}
+          poster={detail?.poster ?? ""}
+          resizeMode="contain"
+          onProgress={handlePlaybackStatusUpdate}
+          onLoad={handleLoad}
           onLoadStart={() => usePlayerStore.setState({ isLoading: true })}
-          useNativeControls={false}
-          shouldPlay
+          onError={(error) => {
+            console.error('Video error:', error);
+            usePlayerStore.setState({ isLoading: false });
+            Toast.show({ type: "error", text1: "播放错误", text2: error.error?.localizedDescription || "未知错误" });
+          }}
+          onEnd={() => {
+            const { currentEpisodeIndex, episodes, playEpisode } = usePlayerStore.getState();
+            if (currentEpisodeIndex < episodes.length - 1) {
+              playEpisode(currentEpisodeIndex + 1);
+            }
+          }}
+          controls={false}
+          paused={false}
         />
 
         {showControls && <PlayerControls showControls={showControls} setShowControls={setShowControls} />}
