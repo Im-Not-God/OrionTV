@@ -257,7 +257,6 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
         outroStartTime,
         ...updates,
       });
-      console.log("Play record saved")
     }
   },
 
